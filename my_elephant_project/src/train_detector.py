@@ -1,5 +1,6 @@
 """
 train_detector.py - Binary classification script (Elephant vs Non-Elephant).
+Now consumes the leak-safe manifest.csv dataset splits.
 """
 
 import os
@@ -7,7 +8,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from preprocess import AudioPreprocessor, ElephantDataset
 
 
@@ -50,17 +51,22 @@ def train_detector(dataset_dir, epochs=10, batch_size=8, lr=1e-3, save_path="bes
     print(f"Using device: {device}")
 
     preprocessor = AudioPreprocessor()
-    dataset = ElephantDataset(data_dir=dataset_dir, mode="detector", preprocessor=preprocessor)
+    manifest_path = os.path.join(dataset_dir, "manifest.csv")
 
-    if len(dataset) == 0:
-        print("No audio samples found in dataset directory!")
-        print("Please place audio files in dataset/elephant/ and dataset/non_elephant/")
+    if not os.path.exists(manifest_path):
+        print(f"Manifest not found at {manifest_path}! Please run prepare_dataset.py first.")
         return
 
-    # Train / Val Split
-    val_size = int(len(dataset) * 0.2)
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    # Load explicit, leak-safe splits
+    train_ds = ElephantDataset(manifest_path=manifest_path, split="train", mode="detector", preprocessor=preprocessor)
+    val_ds = ElephantDataset(manifest_path=manifest_path, split="val", mode="detector", preprocessor=preprocessor)
+    
+    train_size = len(train_ds)
+    val_size = len(val_ds)
+
+    if train_size == 0 or val_size == 0:
+        print("Dataset splits are empty! Check your manifest.csv.")
+        return
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
@@ -71,7 +77,7 @@ def train_detector(dataset_dir, epochs=10, batch_size=8, lr=1e-3, save_path="bes
 
     best_acc = 0.0
 
-    print("Starting Binary Detector Training...")
+    print(f"Starting Binary Detector Training... (Train: {train_size} | Val: {val_size})")
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss, train_correct = 0.0, 0
@@ -116,7 +122,7 @@ def train_detector(dataset_dir, epochs=10, batch_size=8, lr=1e-3, save_path="bes
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Elephant Binary Detector")
-    parser.add_argument("--data_dir", type=str, default="../dataset", help="Path to dataset directory")
+    parser.add_argument("--data_dir", type=str, default="dataset", help="Path to dataset directory")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")

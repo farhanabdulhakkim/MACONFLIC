@@ -1,10 +1,10 @@
 """
 preprocess.py - Audio loading & Mel-Spectrogram generator for Elephant Audio Classification project.
+Loads dataset samples directly from manifest.csv using recording-level splits.
 """
 
 import os
-import glob
-import math
+import csv
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -14,7 +14,7 @@ try:
     import torchaudio
     import torchaudio.transforms as T
     HAS_TORCHAUDIO = True
-except ImportError:
+except (ImportError, OSError):
     HAS_TORCHAUDIO = False
 
 try:
@@ -47,7 +47,7 @@ class AudioPreprocessor:
             y, _ = librosa.load(file_path, sr=self.sample_rate, mono=True)
             return torch.tensor(y, dtype=torch.float32).unsqueeze(0)
         else:
-            raise RuntimeError("Neither torchaudio nor librosa is installed. Please install one to load audio files.")
+            raise RuntimeError("Neither torchaudio nor librosa is available to load audio files.")
 
     def pad_crop(self, waveform):
         """Pads or crops waveform to fixed target duration."""
@@ -80,7 +80,6 @@ class AudioPreprocessor:
             log_mel = np.log(mel + 1e-6)
             return torch.tensor(log_mel, dtype=torch.float32).unsqueeze(0)
         else:
-            # Fallback simple STFT calculation if librosa/torchaudio are absent
             stft = torch.stft(waveform.squeeze(0), n_fft=self.n_fft, hop_length=self.hop_length, return_complex=True)
             spectrogram = torch.abs(stft)[:self.n_mels, :]
             return torch.log(spectrogram + 1e-6).unsqueeze(0)
@@ -94,43 +93,44 @@ class AudioPreprocessor:
 
 
 class ElephantDataset(Dataset):
-    """PyTorch Dataset for elephant binary or call-type multi-class audio data."""
-    def __init__(self, data_dir, mode="detector", preprocessor=None):
+    """PyTorch Dataset loading from manifest.csv with split support."""
+    def __init__(self, manifest_path="dataset/manifest.csv", split="train", mode="detector", preprocessor=None):
         """
-        mode: 'detector' (binary: elephant vs non_elephant)
-              'classifier' (multi-class: trumpet vs roar vs rumble)
+        manifest_path: path to manifest.csv
+        split: 'train', 'val', or 'test'
+        mode: 'detector' (binary: 0=non_elephant, 1=elephant)
+              'classifier' (multi-class: 0=trumpet, 1=roar, 2=rumble)
         """
-        self.data_dir = data_dir
+        self.manifest_path = manifest_path
+        self.split = split
         self.mode = mode
         self.preprocessor = preprocessor or AudioPreprocessor()
         self.samples = []
-        self.label_map = {}
+        self.classifier_label_map = {"trumpet": 0, "roar": 1, "rumble": 2}
 
         self._load_samples()
 
     def _load_samples(self):
-        if self.mode == "detector":
-            self.label_map = {"non_elephant": 0, "elephant": 1}
-            for label_name, label_idx in self.label_map.items():
-                category_dir = os.path.join(self.data_dir, label_name)
-                if not os.path.exists(category_dir):
-                    continue
-                for root, _, files in os.walk(category_dir):
-                    for file in files:
-                        if file.endswith((".wav", ".mp3", ".flac", ".ogg")):
-                            self.samples.append((os.path.join(root, file), label_idx))
+        if not os.path.exists(self.manifest_path):
+            raise FileNotFoundError(f"Manifest not found at {self.manifest_path}. Run prepare_dataset.py first.")
 
-        elif self.mode == "classifier":
-            elephant_dir = os.path.join(self.data_dir, "elephant")
-            call_types = ["trumpet", "roar", "rumble"]
-            self.label_map = {call: i for i, call in enumerate(call_types)}
-            for call in call_types:
-                call_dir = os.path.join(elephant_dir, call)
-                if not os.path.exists(call_dir):
+        with open(self.manifest_path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["split"] != self.split:
                     continue
-                for file in os.listdir(call_dir):
-                    if file.endswith((".wav", ".mp3", ".flac", ".ogg")):
-                        self.samples.append((os.path.join(call_dir, file), self.label_map[call]))
+
+                filepath = row["filepath"]
+                if self.mode == "detector":
+                    label = int(row["label"])
+                    self.samples.append((filepath, label))
+                elif self.mode == "classifier":
+                    # Derive specific call type from filepath or category
+                    if row["category"] == "elephant":
+                        for call in self.classifier_label_map:
+                            if call in filepath.lower():
+                                self.samples.append((filepath, self.classifier_label_map[call]))
+                                break
 
     def __len__(self):
         return len(self.samples)
@@ -142,4 +142,20 @@ class ElephantDataset(Dataset):
 
 
 if __name__ == "__main__":
-    print("Preprocess module loaded. Ready to process audio files.")
+    print("Testing ElephantDataset with manifest.csv...")
+    try:
+        train_ds = ElephantDataset(manifest_path="dataset/manifest.csv", split="train", mode="detector")
+        val_ds = ElephantDataset(manifest_path="dataset/manifest.csv", split="val", mode="detector")
+        test_ds = ElephantDataset(manifest_path="dataset/manifest.csv", split="test", mode="detector")
+
+        print(f"Dataset successfully initialized:")
+        print(f"  Train samples: {len(train_ds)}")
+        print(f"  Val samples:   {len(val_ds)}")
+        print(f"  Test samples:  {len(test_ds)}")
+
+        # Test loading a single sample
+        if len(train_ds) > 0:
+            spec, lbl = train_ds[0]
+            print(f"  Sample 0 Spectrogram Shape: {spec.shape}, Label: {lbl.item()}")
+    except Exception as e:
+        print(f"Error during verification: {e}")
